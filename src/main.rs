@@ -1,15 +1,42 @@
+mod arrow_utils;
+mod datafusion_utils;
+mod exec;
+mod query;
+mod query_functions;
+mod utils;
+
+
 use std::sync::Arc;
 
 use arrow::array::RecordBatch;
 use chrono::{DateTime, Utc};
+use datafusion::prelude::{DataFrame, SessionContext};
 use deltalake::{kernel::{DataType, PrimitiveType, StructField, StructType}, protocol::SaveMode, DeltaOps, DeltaTable};
+use utils::session_state;
 
 #[tokio::main]
 async fn main() {
-    let table = create_table("test_table", "./data").await.unwrap();
-    let start_date = "2021-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let mut table = create_table("test_table", "./data").await.unwrap();
+/*     let start_date = "2021-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
     let batch = create_random_readings(start_date);
-    DeltaOps(table).write(vec![batch]).await.unwrap();
+    DeltaOps(table.clone()).write(vec![batch]).await.unwrap(); */
+    let df = query(
+        "test_table", 
+        &mut table, 
+        "
+        SELECT 
+            date_bin_gapfill(interval '900 seconds', tz(measurement_time, 'Europe/Brussels')) as grouped_time, 
+            sum(interpolate(value))
+        FROM 
+            test_table 
+        where 
+            measurement_time >= '2021-01-01T00:00:00Z' 
+        and 
+            measurement_time < '2021-01-02T00:00:00Z' 
+        GROUP BY 
+            grouped_time")
+        .await.unwrap();
+    df.show().await.unwrap();
 }
 
 
@@ -68,4 +95,14 @@ pub fn create_random_readings(start_date: DateTime<Utc>) -> RecordBatch {
             Arc::new(arrow::array::Float64Array::from(value)),
         ],
     ).unwrap()
+}
+
+
+pub async fn query(table_name: &str, table: &mut DeltaTable, sql: &str) -> Result<DataFrame, datafusion::error::DataFusionError> {
+    table.load().await?;
+    let ctx = SessionContext::new_with_state(session_state());
+    ctx.register_table( table_name, Arc::new(table.clone()))?;
+    let df = ctx.sql(&sql).await?;
+    Ok(df)
+
 }
